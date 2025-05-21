@@ -17,10 +17,16 @@ async function getZapierTools(updateStatus?: (status: string) => void) {
 
   try {
     updateStatus?.("Connecting to Zapier MCP...");
-    const client = new Client({
-      name: "slackbot-mcp-client",
-      version: "1.0.0",
-    });
+    // Use the two-argument constructor as in the Zapier sample code!
+    const client = new Client(
+      {
+        name: "slackbot-mcp-client",
+        version: "1.0.0",
+      },
+      {
+        capabilities: {},
+      }
+    );
 
     const transport = new SSEClientTransport(new URL(zapierUrl));
     await client.connect(transport);
@@ -31,7 +37,6 @@ async function getZapierTools(updateStatus?: (status: string) => void) {
       new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout fetching tools")), 10000))
     ]);
 
-    // Fix: Check if toolsList is an array
     if (!Array.isArray(toolsList) || toolsList.length === 0) {
       updateStatus?.("No Zapier tools found or error fetching tools.");
       return {};
