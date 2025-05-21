@@ -25,9 +25,9 @@ async function getZapierTools(updateStatus?: (status: string) => void) {
   const toolsList = await client.listTools();
 
   // Dynamically create tool definitions for each Zapier tool
-  const zapierTools: Record<string, ReturnType<typeof tool>> = {};
+  const zapierTools: Record<string, any> = {};
   for (const zapTool of toolsList) {
-    zapierTools[zapTool.name] = tool({
+    zapierTools[zapTool.name] = {
       description: zapTool.description,
       parameters: z.object(
         Object.fromEntries(
@@ -37,7 +37,8 @@ async function getZapierTools(updateStatus?: (status: string) => void) {
           ])
         )
       ),
-      execute: async (args: any) => {
+      // Note: Do NOT use the tool() helper here!
+      async execute(args: any) {
         updateStatus?.(`Calling Zapier tool: ${zapTool.name}...`);
         const result = await client.callTool({
           name: zapTool.name,
@@ -45,7 +46,7 @@ async function getZapierTools(updateStatus?: (status: string) => void) {
         });
         return result;
       },
-    });
+    };
   }
 
   return zapierTools;
@@ -67,6 +68,7 @@ export const generateResponse = async (
     messages,
     maxSteps: 10,
     tools: {
+      // Static tools use the tool() helper
       getWeather: tool({
         description: "Get the current weather at a location",
         parameters: z.object({
@@ -115,7 +117,8 @@ export const generateResponse = async (
           };
         },
       }),
-      ...zapierTools, // <-- Add all Zapier tools here!
+      // Spread in all dynamic Zapier tools
+      ...zapierTools,
     },
   });
 
