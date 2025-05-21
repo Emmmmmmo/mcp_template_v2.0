@@ -10,46 +10,60 @@ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 // Helper to dynamically load Zapier tools
 async function getZapierTools(updateStatus?: (status: string) => void) {
   const zapierUrl = process.env.ZAPIER_MCP_URL;
-  if (!zapierUrl) return {};
-
-  updateStatus?.("Connecting to Zapier MCP...");
-  const client = new Client({
-    name: "slackbot-mcp-client",
-    version: "1.0.0",
-  });
-
-  const transport = new SSEClientTransport(new URL(zapierUrl));
-  await client.connect(transport);
-
-  updateStatus?.("Fetching Zapier tools...");
-  const toolsList = await client.listTools();
-
-  // Dynamically create tool definitions for each Zapier tool
-  const zapierTools: Record<string, any> = {};
-  for (const zapTool of toolsList) {
-    zapierTools[zapTool.name] = {
-      description: zapTool.description,
-      parameters: z.object(
-        Object.fromEntries(
-          (zapTool.params || []).map((param: string) => [
-            param,
-            z.any().optional(), // You can refine this if you know param types
-          ])
-        )
-      ),
-      // Note: Do NOT use the tool() helper here!
-      async execute(args: any) {
-        updateStatus?.(`Calling Zapier tool: ${zapTool.name}...`);
-        const result = await client.callTool({
-          name: zapTool.name,
-          arguments: args,
-        });
-        return result;
-      },
-    };
+  if (!zapierUrl) {
+    updateStatus?.("Zapier MCP URL not set.");
+    return {};
   }
 
-  return zapierTools;
+  try {
+    updateStatus?.("Connecting to Zapier MCP...");
+    const client = new Client({
+      name: "slackbot-mcp-client",
+      version: "1.0.0",
+    });
+
+    const transport = new SSEClientTransport(new URL(zapierUrl));
+    await client.connect(transport);
+
+    updateStatus?.("Fetching Zapier tools...");
+    const toolsList = await Promise.race([
+      client.listTools(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout fetching tools")), 10000))
+    ]);
+
+    // Fix: Check if toolsList is an array
+    if (!Array.isArray(toolsList) || toolsList.length === 0) {
+      updateStatus?.("No Zapier tools found or error fetching tools.");
+      return {};
+    }
+
+    const zapierTools: Record<string, any> = {};
+    for (const zapTool of toolsList) {
+      zapierTools[zapTool.name] = {
+        description: zapTool.description,
+        parameters: z.object(
+          Object.fromEntries(
+            (zapTool.params || []).map((param: string) => [
+              param,
+              z.any().optional(),
+            ])
+          )
+        ),
+        async execute(args: any) {
+          updateStatus?.(`Calling Zapier tool: ${zapTool.name}...`);
+          const result = await client.callTool({
+            name: zapTool.name,
+            arguments: args,
+          });
+          return result;
+        },
+      };
+    }
+    return zapierTools;
+  } catch (error: any) {
+    updateStatus?.(`Error fetching Zapier tools: ${error.message || error}`);
+    return {};
+  }
 }
 
 export const generateResponse = async (
