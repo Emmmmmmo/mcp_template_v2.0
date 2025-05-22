@@ -1,54 +1,70 @@
-import type { SlackEvent } from "@slack/web-api";
-import {
-  assistantThreadMessage,
-  handleNewAssistantMessage,
-} from "../lib/handle-messages";
-import { waitUntil } from "@vercel/functions";
-import { handleNewAppMention } from "../lib/handle-app-mention";
-import { verifyRequest, getBotId } from "../lib/slack-utils";
+import { App, LogLevel } from '@slack/bolt';
+import { createParser } from 'eventsource-parser';
+import { openai } from '../lib/openai.js';
 
-export async function POST(request: Request) {
-  const rawBody = await request.text();
-  const payload = JSON.parse(rawBody);
-  const requestType = payload.type as "url_verification" | "event_callback";
+export const config = { runtime: 'nodejs20.x', maxDuration: 60 };
 
-  // See https://api.slack.com/events/url_verification
-  if (requestType === "url_verification") {
-    return new Response(JSON.stringify({ challenge: payload.challenge }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" }
+const slack = new App({
+  token: process.env.SLACK_BOT_TOKEN!,
+  signingSecret: process.env.SLACK_SIGNING_SECRET!,
+  logLevel: LogLevel.INFO
+});
+
+for (const ev of ['message', 'app_mention'] as const) {
+  slack.event(ev, async ({ event, client, context }) => {
+    if ((event as any).subtype === 'bot_message') return;
+
+    const text = (event as any).text?.replace(`<@${context.botUserId}>`, '').trim() ?? '';
+    const thread_ts = (event as any).thread_ts ?? event.ts;
+
+    const stream = await openai.responses.create({
+      model: 'gpt-4o-mini',
+      instructions: 'You are a concise but helpful Slack assistant. Prefer bullet points. Stay under 4000 chars.',
+      input: text,
+      stream: true,
+      tools: [
+        {
+          type: 'mcp',
+          server_label: 'deepwiki',
+          server_url: process.env.MCP_DEEPWIKI_URL!
+        }
+      ]
     });
-  }
 
-  await verifyRequest({ requestType, request, rawBody });
+    const parser = createParser(async (evt) => {
+      if (evt.type !== 'event') return;
+      const data = JSON.parse(evt.data);
 
-  try {
-    const botUserId = await getBotId();
-    console.log("Bot User ID:", botUserId);
-    
-    const event = payload.event;
-    console.log(`Processing event: ${event.type}, channel_type: ${event.channel_type || 'n/a'}`);
-
-    if (event.type === "app_mention") {
-      console.log("Processing app mention");
-      waitUntil(handleNewAppMention(event, botUserId));
-    }
-    else if (event.type === "assistant_thread_started") {
-      console.log("Processing assistant thread started");
-      waitUntil(assistantThreadMessage(event));
-    }
-    else if (event.type === "message") {
-      // Handle both DMs and thread messages
-      console.log(`Processing message event in ${event.channel_type || 'n/a'}`);
-      
-      if (event.user && event.user !== botUserId && !event.subtype) {
-        waitUntil(handleNewAssistantMessage(event, botUserId));
+      if (data.type === 'text') {
+        await client.chat.postMessage({
+          channel: (event as any).channel,
+          text: data.text,
+          thread_ts
+        });
       }
-    }
 
-    return new Response("Success!", { status: 200 });
-  } catch (error) {
-    console.error("Error in event processing:", error);
-    return new Response("Error processing event", { status: 500 });
-  }
+      if (data.type === 'tool') {
+        const res = await fetch(`${data.server_url}/call_tool`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            name: data.name,
+            arguments: data.parameters
+          }),
+          timeout: 30_000
+        });
+
+        const result = await res.json();
+
+        await openai.responses.create({
+          response_id: data.response_id,
+          messages: [{ role: 'tool', name: data.name, content: result }]
+        });
+      }
+    });
+
+    for await (const chunk of stream) parser.feed(chunk);
+  });
 }
+
+export default slack.start();
