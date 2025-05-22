@@ -1,6 +1,6 @@
 {
   "functions": {
-    "api/events.ts": {
+    "api/events.js": {
       "runtime": "nodejs20.x",
       "maxDuration": 60
     }
